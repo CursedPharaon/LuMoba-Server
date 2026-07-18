@@ -4,6 +4,7 @@ import hashlib
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
+import urllib.parse
 
 app = Flask(__name__)
 CORS(app)
@@ -17,6 +18,8 @@ DB_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODQ0MTA
 def query_db(sql):
     """Отправка SQL через HTTP API"""
     try:
+        print(f"📝 Выполняем SQL: {sql[:100]}...")
+        
         response = requests.post(
             DB_URL,
             headers={
@@ -30,16 +33,19 @@ def query_db(sql):
         )
         
         if response.status_code != 200:
-            print(f"❌ Ошибка HTTP: {response.status_code}")
-            return {'error': response.text}
+            print(f"❌ HTTP ошибка: {response.status_code}")
+            print(f"Ответ: {response.text[:200]}")
+            return {'error': f'HTTP {response.status_code}: {response.text[:100]}'}
         
-        return response.json()
+        data = response.json()
+        print(f"✅ Ответ получен")
+        return data
     except Exception as e:
-        print(f"❌ Ошибка подключения: {e}")
+        print(f"❌ Ошибка: {e}")
         return {'error': str(e)}
 
 # ============================================================
-#   ИНИЦИАЛИЗАЦИЯ БД
+#   ИНИЦИАЛИЗАЦИЯ БД (создаём ТОЛЬКО таблицу users)
 # ============================================================
 def init_db():
     sql = """
@@ -56,26 +62,7 @@ def init_db():
             class TEXT DEFAULT 'fighter',
             clan TEXT DEFAULT 'Без клана',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        
-        CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            kills INTEGER,
-            deaths INTEGER,
-            gold_earned INTEGER,
-            result TEXT,
-            played_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-        
-        CREATE TABLE IF NOT EXISTS clans (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            leader_id INTEGER,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (leader_id) REFERENCES users(id)
-        );
+        )
     """
     result = query_db(sql)
     if 'error' in result:
@@ -85,6 +72,7 @@ def init_db():
     return True
 
 # Инициализируем при старте
+print("🔄 Инициализация базы данных...")
 init_db()
 
 # ============================================================
@@ -96,6 +84,8 @@ def hash_password(password):
 def extract_rows(result):
     """Извлекает строки из ответа Turso"""
     try:
+        if 'error' in result:
+            return []
         return result.get('results', [{}])[0].get('response', {}).get('result', {}).get('rows', [])
     except:
         return []
@@ -110,112 +100,125 @@ def home():
 
 @app.route('/api/register', methods=['POST'])
 def register():
-    data = request.json
-    username = data.get('username', '').strip()
-    password = data.get('password', '').strip()
-    
-    if not username or not password:
-        return jsonify({'error': 'Заполните все поля'}), 400
-    
-    # Проверяем существование
-    check = query_db(f"SELECT id FROM users WHERE username = '{username}'")
-    if extract_rows(check):
-        return jsonify({'error': 'Пользователь уже существует'}), 400
-    
-    hashed = hash_password(password)
-    
-    # Создаём пользователя
-    result = query_db(
-        f"INSERT INTO users (username, password) VALUES ('{username}', '{hashed}')"
-    )
-    
-    if 'error' in result:
-        return jsonify({'error': 'Ошибка базы данных'}), 500
-    
-    return jsonify({'success': True, 'message': 'Аккаунт создан!'})
+    try:
+        data = request.json
+        username = data.get('username', '').strip()
+        password = data.get('password', '').strip()
+        
+        print(f"📝 Регистрация: {username}")
+        
+        if not username or not password:
+            return jsonify({'error': 'Заполните все поля'}), 400
+        
+        # Проверяем существование
+        check = query_db(f"SELECT id FROM users WHERE username = '{username}'")
+        rows = extract_rows(check)
+        
+        if rows:
+            return jsonify({'error': 'Пользователь уже существует'}), 400
+        
+        hashed = hash_password(password)
+        
+        # Создаём пользователя
+        sql = f"INSERT INTO users (username, password) VALUES ('{username}', '{hashed}')"
+        result = query_db(sql)
+        
+        if 'error' in result:
+            print(f"❌ Ошибка вставки: {result}")
+            return jsonify({'error': 'Ошибка базы данных'}), 500
+        
+        return jsonify({'success': True, 'message': 'Аккаунт создан!'})
+        
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    data = request.json
-    username = data.get('username', '').strip()
-    password = data.get('password', '').strip()
-    
-    if not username or not password:
-        return jsonify({'error': 'Заполните все поля'}), 400
-    
-    hashed = hash_password(password)
-    
-    result = query_db(
-        f"SELECT id, username, rank, level, exp, gold, kills, deaths, class, clan FROM users WHERE username = '{username}' AND password = '{hashed}'"
-    )
-    
-    rows = extract_rows(result)
-    if not rows:
-        return jsonify({'error': 'Неверный логин или пароль'}), 401
-    
-    user = rows[0]
-    return jsonify({
-        'success': True,
-        'user': {
-            'id': user[0],
-            'username': user[1],
-            'rank': user[2],
-            'level': user[3],
-            'exp': user[4],
-            'gold': user[5],
-            'kills': user[6],
-            'deaths': user[7],
-            'class': user[8],
-            'clan': user[9]
-        }
-    })
+    try:
+        data = request.json
+        username = data.get('username', '').strip()
+        password = data.get('password', '').strip()
+        
+        print(f"📝 Вход: {username}")
+        
+        if not username or not password:
+            return jsonify({'error': 'Заполните все поля'}), 400
+        
+        hashed = hash_password(password)
+        
+        sql = f"SELECT id, username, rank, level, exp, gold, kills, deaths, class, clan FROM users WHERE username = '{username}' AND password = '{hashed}'"
+        result = query_db(sql)
+        
+        rows = extract_rows(result)
+        if not rows:
+            return jsonify({'error': 'Неверный логин или пароль'}), 401
+        
+        user = rows[0]
+        return jsonify({
+            'success': True,
+            'user': {
+                'id': user[0],
+                'username': user[1],
+                'rank': user[2],
+                'level': user[3],
+                'exp': user[4],
+                'gold': user[5],
+                'kills': user[6],
+                'deaths': user[7],
+                'class': user[8],
+                'clan': user[9] if len(user) > 9 else 'Без клана'
+            }
+        })
+        
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/top', methods=['GET'])
 def get_top():
-    result = query_db(
-        "SELECT username, kills, rank, level FROM users ORDER BY kills DESC LIMIT 10"
-    )
-    rows = extract_rows(result)
-    
-    return jsonify([{
-        'username': row[0],
-        'kills': row[1],
-        'rank': row[2],
-        'level': row[3]
-    } for row in rows])
+    try:
+        result = query_db("SELECT username, kills, rank, level FROM users ORDER BY kills DESC LIMIT 10")
+        rows = extract_rows(result)
+        
+        return jsonify([{
+            'username': row[0],
+            'kills': row[1],
+            'rank': row[2],
+            'level': row[3]
+        } for row in rows])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/update_stats', methods=['POST'])
 def update_stats():
-    data = request.json
-    user_id = data.get('user_id')
-    kills = data.get('kills', 0)
-    deaths = data.get('deaths', 0)
-    gold = data.get('gold', 0)
-    exp = data.get('exp', 0)
-    result = data.get('result', 'loss')
-    
-    # Обновляем пользователя
-    query_db(f"""
-        UPDATE users SET 
-            kills = kills + {kills},
-            deaths = deaths + {deaths},
-            gold = gold + {gold},
-            exp = exp + {exp}
-        WHERE id = {user_id}
-    """)
-    
-    # Добавляем матч
-    query_db(f"""
-        INSERT INTO matches (user_id, kills, deaths, gold_earned, result) 
-        VALUES ({user_id}, {kills}, {deaths}, {gold}, '{result}')
-    """)
-    
-    return jsonify({'success': True})
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        kills = data.get('kills', 0)
+        deaths = data.get('deaths', 0)
+        gold = data.get('gold', 0)
+        exp = data.get('exp', 0)
+        result = data.get('result', 'loss')
+        
+        # Обновляем пользователя
+        query_db(f"""
+            UPDATE users SET 
+                kills = kills + {kills},
+                deaths = deaths + {deaths},
+                gold = gold + {gold},
+                exp = exp + {exp}
+            WHERE id = {user_id}
+        """)
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # ============================================================
 #   ЗАПУСК
 # ============================================================
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+    print(f"🚀 Запуск сервера на порту {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
-    print(f"🚀 Сервер запущен на порту {port}")
